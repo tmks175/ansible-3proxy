@@ -1,0 +1,30 @@
+#daemon
+nscache 65536
+nserver 1.1.1.1
+nserver 8.8.8.8
+
+timeouts 1 5 30 60 180 1800 15 60
+
+users user1:CL:{{ password1 }}
+users user2:CL:{{ password2 }}
+users user3:CL:{{ password3 }}
+users user4:CL:{{ password4 }}
+users user5:CL:{{ password5 }}
+
+log /dev/null
+
+#Binding address
+external 91.229.149.159
+
+#SOCKS5
+auth strong
+flush
+
+# Unlimited access
+# allow  *
+
+# Access only to subnets
+allow * * 149.154.164.0/22,149.154.160.0/20,91.108.8.0/22,91.108.56.0/22,91.108.4.0/22,95.161.64.0/20,149.154.167.0/24,91.108.16.0/22,91.108.12.0/22,91.105.192.0/23,91.108.20.0/22,185.76.151.0/24
+
+maxconn 64
+socks -p{{ socks_port }}

@@ -1,0 +1,183 @@
+---
+- name: Install and configure 3proxy with source compilation
+  hosts: proxies
+  become: true
+
+  vars:
+    timezone: "Asia/Yekaterinburg"
+    proxy_version: "0.9.5"
+
+    # Proxy port and passwords for templates/3proxy.cfg.j2
+    socks_port_min: 37000
+    socks_port_max: 61999
+    socks_port: "{{ (socks_port_min + ((socks_port_max - socks_port_min + 1) | random - 1)) | int }}"
+    
+    password1: "{{ lookup('password', '/dev/null length=10 chars=ascii_letters,digits') }}"
+    password2: "{{ lookup('password', '/dev/null length=10 chars=ascii_letters,digits') }}"
+    password3: "{{ lookup('password', '/dev/null length=10 chars=ascii_letters,digits') }}"
+    password4: "{{ lookup('password', '/dev/null length=10 chars=ascii_letters,digits') }}"
+    password5: "{{ lookup('password', '/dev/null length=10 chars=ascii_letters,digits') }}"
+    
+  tasks:
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: [update]
+
+    - name: Upgrade all packages
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+      tags: [update]
+
+    - name: Install base utilities
+      ansible.builtin.apt:
+        name:
+          - htop
+          - wget
+          - curl
+          - gzip
+          - mc
+          - rsyslog
+          - net-tools
+          - build-essential
+        state: present
+      tags: [packages]
+
+    - name: Remove nftables if present
+      ansible.builtin.apt:
+        name: nftables
+        state: absent
+        purge: yes
+        autoremove: yes
+      register: nftables_removed
+      tags: [firewall-prep]
+
+    - name: Install iptables
+      ansible.builtin.apt:
+        name: iptables
+        state: present
+        update_cache: no
+      tags: [firewall-prep]
+
+    - name: Set system timezone
+      ansible.builtin.timezone:
+        name: "{{ timezone }}"
+
+    - name: Apply sysctl settings (disable IPv6 + enable forwarding)
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { key: net.ipv6.conf.all.disable_ipv6,    value: "1" }
+        - { key: net.ipv6.conf.default.disable_ipv6, value: "1" }
+        - { key: net.ipv6.conf.lo.disable_ipv6,      value: "1" }
+        - { key: net.ipv4.ip_forward,                value: "1" }
+
+    - name: Create required directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /etc/3proxy
+        - /var/log/3proxy
+        - /etc/iptables
+
+    - name: Place iptables.sh script (manual execution only)
+      ansible.builtin.copy:
+        src: files/iptables.sh
+        dest: /etc/iptables.sh
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Check if 3proxy binary already exists
+      ansible.builtin.stat:
+        path: /usr/bin/3proxy
+      register: binary_stat
+
+    - name: Download 3proxy source archive
+      ansible.builtin.get_url:
+        url: "https://github.com/z3APA3A/3proxy/archive/{{ proxy_version }}.tar.gz"
+        dest: "/tmp/3proxy-{{ proxy_version }}.tar.gz"
+        mode: '0644'
+      when: not binary_stat.stat.exists
+
+    - name: Unarchive 3proxy sources
+      ansible.builtin.unarchive:
+        src: "/tmp/3proxy-{{ proxy_version }}.tar.gz"
+        dest: /tmp/
+        remote_src: yes
+        creates: "/tmp/3proxy-{{ proxy_version }}"
+      when: not binary_stat.stat.exists
+
+    - name: Build 3proxy only if binary is missing
+      community.general.make:
+        chdir: "/tmp/3proxy-{{ proxy_version }}"
+        file: Makefile.Linux
+      when: not binary_stat.stat.exists
+
+    - name: Install 3proxy binary
+      ansible.builtin.copy:
+        src: "/tmp/3proxy-{{ proxy_version }}/bin/3proxy"
+        dest: /usr/bin/3proxy
+        owner: root
+        group: root
+        mode: '0755'
+        remote_src: yes
+      when: not binary_stat.stat.exists
+
+    - name: Clean up 3proxy build directory
+      ansible.builtin.file:
+        path: "/tmp/3proxy-{{ proxy_version }}"
+        state: absent
+      when: not binary_stat.stat.exists
+
+    - name: Check if 3proxy config already exists
+      ansible.builtin.stat:
+        path: /etc/3proxy/3proxy.cfg
+      register: config_stat
+
+    - name: Deploy 3proxy configuration (random port-pass and only if missing)
+      ansible.builtin.template:
+        src: templates/3proxy.cfg.j2
+        dest: /etc/3proxy/3proxy.cfg
+        owner: root
+        group: root
+        mode: '0600'
+      when: not config_stat.stat.exists
+      notify: Restart 3proxy
+
+    - name: Deploy 3proxy systemd unit
+      ansible.builtin.copy:
+        src: files/3proxy.service
+        dest: /etc/systemd/system/3proxy.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Systemctl daemon-reload
+
+    - name: Ensure 3proxy is started and enabled
+      ansible.builtin.systemd_service:
+        name: 3proxy
+        state: started
+        enabled: true
+        daemon_reload: true
+
+  handlers:
+    - name: Systemctl daemon-reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart 3proxy
+      ansible.builtin.systemd_service:
+        name: 3proxy
+        state: restarted
